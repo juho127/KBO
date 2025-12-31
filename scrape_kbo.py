@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
 KBO 정규시즌 선수별 기록 수집 스크립트
-- 타자 기록: Basic1 페이지
-- 투수 기록: Basic1 페이지
+- 타자 기록: 팀별 전체 선수
+- 투수 기록: 팀별 전체 선수
 - 연도: 2000-2025
-- 전 팀 대상 (현대 유니콘스 포함)
+- 전 팀 대상 (현대 유니콘스, 해태 타이거즈 등 과거 팀 포함)
 
 Playwright를 사용하여 JavaScript 렌더링 지원
 """
@@ -17,7 +17,7 @@ import re
 from datetime import datetime
 
 
-def parse_table(html, year):
+def parse_table(html, year, team_code, team_name):
     """테이블에서 데이터 추출"""
     soup = BeautifulSoup(html, 'html.parser')
     table = soup.find('table', class_='tData01')
@@ -53,6 +53,8 @@ def parse_table(html, year):
 
                 if player_data and player_data.get('선수명'):
                     player_data['year'] = year
+                    player_data['teamCode'] = team_code
+                    player_data['teamName'] = team_name
                     players.append(player_data)
 
     return players
@@ -76,23 +78,31 @@ def get_total_pages(html):
     return max_page
 
 
-def collect_year_data(page, url, year):
-    """특정 연도의 전체 데이터 수집 (Playwright 사용)"""
+def get_teams_for_year(page):
+    """현재 연도의 팀 목록 가져오기"""
+    teams = []
+    options = page.locator('select[name*="ddlTeam"] option').all()
+    for opt in options:
+        value = opt.get_attribute('value')
+        text = opt.text_content().strip()
+        if value:  # 빈 값(팀 선택) 제외
+            teams.append((value, text))
+    return teams
+
+
+def collect_team_data(page, year, team_code, team_name):
+    """특정 팀의 전체 선수 데이터 수집"""
     all_players = []
 
     try:
-        # 페이지 로드
-        page.goto(url, timeout=60000)
-        page.wait_for_selector('table.tData01', timeout=30000)
-
-        # 연도 선택
-        page.select_option('select[name*="ddlSeason"]', str(year))
-        time.sleep(1.5)  # 페이지 로딩 대기
+        # 팀 선택
+        page.select_option('select[name*="ddlTeam"]', team_code)
+        time.sleep(1)
         page.wait_for_selector('table.tData01', timeout=30000)
 
         # 첫 페이지 데이터 추출
         html = page.content()
-        page_players = parse_table(html, year)
+        page_players = parse_table(html, year, team_code, team_name)
         if page_players:
             all_players.extend(page_players)
 
@@ -103,28 +113,56 @@ def collect_year_data(page, url, year):
         if total_pages > 1:
             for page_num in range(2, total_pages + 1):
                 try:
-                    # 페이지 버튼 클릭
                     btn_selector = f'a[id*="btnNo{page_num}"]'
                     if page.locator(btn_selector).count() > 0:
                         page.click(btn_selector)
-                        time.sleep(1)
+                        time.sleep(0.8)
                         page.wait_for_selector('table.tData01', timeout=30000)
 
                         html = page.content()
-                        page_players = parse_table(html, year)
+                        page_players = parse_table(html, year, team_code, team_name)
                         if not page_players:
                             break
                         all_players.extend(page_players)
                     else:
                         break
                 except Exception as e:
-                    print(f"      페이지 {page_num} 오류: {e}")
+                    print(f" [페이지 {page_num} 오류: {e}]", end='')
                     break
 
         return all_players
 
     except Exception as e:
-        print(f"    오류: {e}")
+        print(f" [오류: {e}]", end='')
+        return all_players
+
+
+def collect_year_data(page, url, year):
+    """특정 연도의 모든 팀 데이터 수집"""
+    all_players = []
+
+    try:
+        # 페이지 로드
+        page.goto(url, timeout=60000)
+        page.wait_for_selector('table.tData01', timeout=30000)
+
+        # 연도 선택
+        page.select_option('select[name*="ddlSeason"]', str(year))
+        time.sleep(1.5)
+        page.wait_for_selector('table.tData01', timeout=30000)
+
+        # 해당 연도의 팀 목록 가져오기
+        teams = get_teams_for_year(page)
+
+        for team_code, team_name in teams:
+            team_players = collect_team_data(page, year, team_code, team_name)
+            all_players.extend(team_players)
+            print(f" {team_name}:{len(team_players)}", end='')
+
+        return all_players
+
+    except Exception as e:
+        print(f" [오류: {e}]", end='')
         return all_players
 
 
@@ -135,9 +173,8 @@ def main():
     all_pitcher_data = []
 
     print("=" * 60)
-    print("KBO 선수 기록 수집 시작 (Playwright)")
+    print("KBO 선수 기록 수집 시작 (팀별 전체 선수)")
     print(f"연도 범위: {years[0]} - {years[-1]}")
-    print("(현대 유니콘스 등 과거 팀 포함)")
     print("=" * 60)
 
     with sync_playwright() as p:
@@ -150,38 +187,20 @@ def main():
         print("\n[1/2] 타자 기록 수집 중...")
 
         for year in years:
-            print(f"\n{year}년 타자 기록 수집 중...", end=' ')
+            print(f"\n{year}년:", end='')
             year_data = collect_year_data(page, hitter_url, year)
             all_hitter_data.extend(year_data)
-
-            # 팀별 통계
-            teams = {}
-            for pl in year_data:
-                team = pl.get('팀명', 'Unknown')
-                teams[team] = teams.get(team, 0) + 1
-
-            print(f"총 {len(year_data)}명")
-            for team, count in sorted(teams.items()):
-                print(f"    {team}: {count}명")
+            print(f" → 총 {len(year_data)}명")
 
         # 투수 기록 수집
         pitcher_url = 'https://www.koreabaseball.com/Record/Player/PitcherBasic/Basic1.aspx'
         print("\n[2/2] 투수 기록 수집 중...")
 
         for year in years:
-            print(f"\n{year}년 투수 기록 수집 중...", end=' ')
+            print(f"\n{year}년:", end='')
             year_data = collect_year_data(page, pitcher_url, year)
             all_pitcher_data.extend(year_data)
-
-            # 팀별 통계
-            teams = {}
-            for pl in year_data:
-                team = pl.get('팀명', 'Unknown')
-                teams[team] = teams.get(team, 0) + 1
-
-            print(f"총 {len(year_data)}명")
-            for team, count in sorted(teams.items()):
-                print(f"    {team}: {count}명")
+            print(f" → 총 {len(year_data)}명")
 
         browser.close()
 
@@ -195,11 +214,10 @@ def main():
     with open(hitter_filename, 'w', encoding='utf-8') as f:
         json.dump({
             'metadata': {
-                'description': 'KBO 정규시즌 타자 기록 (2000-2025)',
+                'description': 'KBO 정규시즌 타자 기록 (2000-2025) - 팀별 전체 선수',
                 'source': 'https://www.koreabaseball.com',
                 'collected_at': datetime.now().isoformat(),
                 'total_records': len(all_hitter_data),
-                'note': '현대 유니콘스 등 과거 팀 포함'
             },
             'data': all_hitter_data
         }, f, ensure_ascii=False, indent=2)
@@ -207,11 +225,10 @@ def main():
     with open(pitcher_filename, 'w', encoding='utf-8') as f:
         json.dump({
             'metadata': {
-                'description': 'KBO 정규시즌 투수 기록 (2000-2025)',
+                'description': 'KBO 정규시즌 투수 기록 (2000-2025) - 팀별 전체 선수',
                 'source': 'https://www.koreabaseball.com',
                 'collected_at': datetime.now().isoformat(),
                 'total_records': len(all_pitcher_data),
-                'note': '현대 유니콘스 등 과거 팀 포함'
             },
             'data': all_pitcher_data
         }, f, ensure_ascii=False, indent=2)
