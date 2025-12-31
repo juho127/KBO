@@ -12,12 +12,10 @@ KBO(한국프로야구) 정규시즌 선수별 기록을 수집하는 Python 스
 
 ```
 kbo/
-├── scrape_kbo.py                      # 메인 스크래핑 스크립트 (requests 기반)
-├── scrape_kbo_playwright.py           # Playwright 기반 대체 스크립트
-├── scrape_kbo_selenium.py             # Selenium 기반 대체 스크립트
-├── kbo_hitter_stats_2000_2025.json    # 타자 기록 (JSON)
+├── scrape_kbo.py                      # 메인 스크래핑 스크립트 (Playwright 기반)
+├── kbo_hitter_stats_2000_2025.json    # 타자 기록 (JSON) - 1,228건
 ├── kbo_hitter_stats_2000_2025.xlsx    # 타자 기록 (Excel)
-├── kbo_pitcher_stats_2000_2025.json   # 투수 기록 (JSON)
+├── kbo_pitcher_stats_2000_2025.json   # 투수 기록 (JSON) - 521건
 └── kbo_pitcher_stats_2000_2025.xlsx   # 투수 기록 (Excel)
 ```
 
@@ -26,7 +24,8 @@ kbo/
 ### 필수 패키지
 
 ```bash
-pip install requests beautifulsoup4 pandas openpyxl
+pip install playwright beautifulsoup4
+playwright install chromium
 ```
 
 ### 실행
@@ -34,6 +33,11 @@ pip install requests beautifulsoup4 pandas openpyxl
 ```bash
 python scrape_kbo.py
 ```
+
+## ⚠️ 기술 노트
+
+KBO 웹사이트는 ASP.NET 기반으로 연도 변경 시 JavaScript 렌더링이 필요합니다.
+기존 `requests` 라이브러리로는 연도 변경이 제대로 작동하지 않아 **Playwright**를 사용하여 실제 브라우저 환경에서 데이터를 수집합니다.
 
 ## 📈 데이터 필드
 

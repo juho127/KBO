@@ -4,42 +4,22 @@ KBO 정규시즌 선수별 기록 수집 스크립트
 - 타자 기록: Basic1 페이지
 - 투수 기록: Basic1 페이지
 - 연도: 2000-2025
-- 전 팀 대상
+- 전 팀 대상 (현대 유니콘스 포함)
 
-각 연도별로 전체 데이터를 페이징하여 수집
+Playwright를 사용하여 JavaScript 렌더링 지원
 """
 
-import requests
+from playwright.sync_api import sync_playwright
 from bs4 import BeautifulSoup
 import json
 import time
 import re
 from datetime import datetime
-from urllib.parse import urlencode
-
-HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-    'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
-    'Referer': 'https://www.koreabaseball.com/',
-}
 
 
-def get_viewstate_regex(html):
-    """정규식으로 ASP.NET ViewState 값 추출"""
-    viewstate_match = re.search(r'id="__VIEWSTATE"[^>]*value="([^"]*)"', html)
-    viewstate_gen_match = re.search(r'id="__VIEWSTATEGENERATOR"[^>]*value="([^"]*)"', html)
-    event_validation_match = re.search(r'id="__EVENTVALIDATION"[^>]*value="([^"]*)"', html)
-
-    return {
-        '__VIEWSTATE': viewstate_match.group(1) if viewstate_match else '',
-        '__VIEWSTATEGENERATOR': viewstate_gen_match.group(1) if viewstate_gen_match else '',
-        '__EVENTVALIDATION': event_validation_match.group(1) if event_validation_match else '',
-    }
-
-
-def parse_table(soup, year):
+def parse_table(html, year):
     """테이블에서 데이터 추출"""
+    soup = BeautifulSoup(html, 'html.parser')
     table = soup.find('table', class_='tData01')
     if not table:
         return []
@@ -78,87 +58,68 @@ def parse_table(soup, year):
     return players
 
 
-def get_total_pages(soup):
+def get_total_pages(html):
     """전체 페이지 수 확인"""
-    # 페이저에서 마지막 페이지 번호 찾기
+    soup = BeautifulSoup(html, 'html.parser')
     pager = soup.find('div', class_='paging')
-    if pager:
-        # 페이지 링크들 찾기
-        page_links = pager.find_all('a')
-        max_page = 1
-        for link in page_links:
-            text = link.get_text(strip=True)
-            if text.isdigit():
-                max_page = max(max_page, int(text))
-        return max_page
-    return 1
+    if not pager:
+        return 1
+
+    max_page = 1
+    for link in pager.find_all('a'):
+        link_id = link.get('id', '')
+        match = re.search(r'btnNo(\d+)', link_id)
+        if match:
+            page_num = int(match.group(1))
+            max_page = max(max_page, page_num)
+
+    return max_page
 
 
-def collect_year_data(base_url, year, session):
-    """특정 연도의 전체 데이터 수집 (모든 페이지)"""
+def collect_year_data(page, url, year):
+    """특정 연도의 전체 데이터 수집 (Playwright 사용)"""
     all_players = []
 
     try:
-        # 첫 페이지 로드
-        url = f'{base_url}?years={year}'
-        response = session.get(url, headers=HEADERS, timeout=30)
-        response.raise_for_status()
+        # 페이지 로드
+        page.goto(url, timeout=60000)
+        page.wait_for_selector('table.tData01', timeout=30000)
 
-        html = response.text
-        soup = BeautifulSoup(html, 'html.parser')
+        # 연도 선택
+        page.select_option('select[name*="ddlSeason"]', str(year))
+        time.sleep(1.5)  # 페이지 로딩 대기
+        page.wait_for_selector('table.tData01', timeout=30000)
 
         # 첫 페이지 데이터 추출
-        page_players = parse_table(soup, year)
+        html = page.content()
+        page_players = parse_table(html, year)
         if page_players:
             all_players.extend(page_players)
 
-        # ViewState 추출
-        viewstate = get_viewstate_regex(html)
+        # 페이지 수 확인
+        total_pages = get_total_pages(html)
 
-        # 페이지 수 확인 및 나머지 페이지 수집
-        page = 2
-        max_pages = 50  # 최대 페이지 수 제한
+        # 2페이지 이상 있으면 추가 수집
+        if total_pages > 1:
+            for page_num in range(2, total_pages + 1):
+                try:
+                    # 페이지 버튼 클릭
+                    btn_selector = f'a[id*="btnNo{page_num}"]'
+                    if page.locator(btn_selector).count() > 0:
+                        page.click(btn_selector)
+                        time.sleep(1)
+                        page.wait_for_selector('table.tData01', timeout=30000)
 
-        while page <= max_pages:
-            try:
-                # POST로 다음 페이지 요청
-                post_data = {
-                    '__EVENTTARGET': f'ctl00$ctl00$ctl00$cphContents$cphContents$cphContents$ucPager$btnNo{page}',
-                    '__EVENTARGUMENT': '',
-                    '__LASTFOCUS': '',
-                    '__VIEWSTATE': viewstate['__VIEWSTATE'],
-                    '__VIEWSTATEGENERATOR': viewstate['__VIEWSTATEGENERATOR'],
-                    '__EVENTVALIDATION': viewstate['__EVENTVALIDATION'],
-                    'ctl00$ctl00$ctl00$cphContents$cphContents$cphContents$ddlSeason$ddlSeason': str(year),
-                    'ctl00$ctl00$ctl00$cphContents$cphContents$cphContents$ddlSeries$ddlSeries': '0',
-                    'ctl00$ctl00$ctl00$cphContents$cphContents$cphContents$ddlTeam$ddlTeam': '',
-                    'ctl00$ctl00$ctl00$cphContents$cphContents$cphContents$ddlPos$ddlPos': '',
-                    'ctl00$ctl00$ctl00$cphContents$cphContents$cphContents$ddlSituation$ddlSituation': '',
-                    'ctl00$ctl00$ctl00$cphContents$cphContents$cphContents$ddlSituationDetail$ddlSituationDetail': '',
-                }
-
-                post_headers = HEADERS.copy()
-                post_headers['Content-Type'] = 'application/x-www-form-urlencoded'
-
-                response = session.post(url, data=post_data, headers=post_headers, timeout=30)
-                response.raise_for_status()
-
-                html = response.text
-                soup = BeautifulSoup(html, 'html.parser')
-
-                page_players = parse_table(soup, year)
-                if not page_players:
+                        html = page.content()
+                        page_players = parse_table(html, year)
+                        if not page_players:
+                            break
+                        all_players.extend(page_players)
+                    else:
+                        break
+                except Exception as e:
+                    print(f"      페이지 {page_num} 오류: {e}")
                     break
-
-                all_players.extend(page_players)
-                viewstate = get_viewstate_regex(html)
-
-                page += 1
-                time.sleep(0.3)
-
-            except Exception as e:
-                # 더 이상 페이지가 없으면 종료
-                break
 
         return all_players
 
@@ -168,59 +129,61 @@ def collect_year_data(base_url, year, session):
 
 
 def main():
-    years = list(range(2000, 2026))  # 2000-2025
+    years = list(range(2025, 1999, -1))  # 2025-2000
 
     all_hitter_data = []
     all_pitcher_data = []
 
-    session = requests.Session()
-
     print("=" * 60)
-    print("KBO 선수 기록 수집 시작")
+    print("KBO 선수 기록 수집 시작 (Playwright)")
     print(f"연도 범위: {years[0]} - {years[-1]}")
+    print("(현대 유니콘스 등 과거 팀 포함)")
     print("=" * 60)
 
-    # 타자 기록 수집
-    hitter_url = 'https://www.koreabaseball.com/Record/Player/HitterBasic/Basic1.aspx'
-    print("\n[1/2] 타자 기록 수집 중...")
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context()
+        page = context.new_page()
 
-    for year in years:
-        print(f"\n{year}년 타자 기록 수집 중...", end=' ')
-        year_data = collect_year_data(hitter_url, year, session)
-        all_hitter_data.extend(year_data)
+        # 타자 기록 수집
+        hitter_url = 'https://www.koreabaseball.com/Record/Player/HitterBasic/Basic1.aspx'
+        print("\n[1/2] 타자 기록 수집 중...")
 
-        # 팀별 통계
-        teams = {}
-        for p in year_data:
-            team = p.get('팀명', 'Unknown')
-            teams[team] = teams.get(team, 0) + 1
+        for year in years:
+            print(f"\n{year}년 타자 기록 수집 중...", end=' ')
+            year_data = collect_year_data(page, hitter_url, year)
+            all_hitter_data.extend(year_data)
 
-        print(f"총 {len(year_data)}명")
-        for team, count in sorted(teams.items()):
-            print(f"    {team}: {count}명")
+            # 팀별 통계
+            teams = {}
+            for pl in year_data:
+                team = pl.get('팀명', 'Unknown')
+                teams[team] = teams.get(team, 0) + 1
 
-        time.sleep(0.5)
+            print(f"총 {len(year_data)}명")
+            for team, count in sorted(teams.items()):
+                print(f"    {team}: {count}명")
 
-    # 투수 기록 수집
-    pitcher_url = 'https://www.koreabaseball.com/Record/Player/PitcherBasic/Basic1.aspx'
-    print("\n[2/2] 투수 기록 수집 중...")
+        # 투수 기록 수집
+        pitcher_url = 'https://www.koreabaseball.com/Record/Player/PitcherBasic/Basic1.aspx'
+        print("\n[2/2] 투수 기록 수집 중...")
 
-    for year in years:
-        print(f"\n{year}년 투수 기록 수집 중...", end=' ')
-        year_data = collect_year_data(pitcher_url, year, session)
-        all_pitcher_data.extend(year_data)
+        for year in years:
+            print(f"\n{year}년 투수 기록 수집 중...", end=' ')
+            year_data = collect_year_data(page, pitcher_url, year)
+            all_pitcher_data.extend(year_data)
 
-        # 팀별 통계
-        teams = {}
-        for p in year_data:
-            team = p.get('팀명', 'Unknown')
-            teams[team] = teams.get(team, 0) + 1
+            # 팀별 통계
+            teams = {}
+            for pl in year_data:
+                team = pl.get('팀명', 'Unknown')
+                teams[team] = teams.get(team, 0) + 1
 
-        print(f"총 {len(year_data)}명")
-        for team, count in sorted(teams.items()):
-            print(f"    {team}: {count}명")
+            print(f"총 {len(year_data)}명")
+            for team, count in sorted(teams.items()):
+                print(f"    {team}: {count}명")
 
-        time.sleep(0.5)
+        browser.close()
 
     # JSON 파일로 저장
     print("\n" + "=" * 60)
@@ -235,7 +198,8 @@ def main():
                 'description': 'KBO 정규시즌 타자 기록 (2000-2025)',
                 'source': 'https://www.koreabaseball.com',
                 'collected_at': datetime.now().isoformat(),
-                'total_records': len(all_hitter_data)
+                'total_records': len(all_hitter_data),
+                'note': '현대 유니콘스 등 과거 팀 포함'
             },
             'data': all_hitter_data
         }, f, ensure_ascii=False, indent=2)
@@ -246,7 +210,8 @@ def main():
                 'description': 'KBO 정규시즌 투수 기록 (2000-2025)',
                 'source': 'https://www.koreabaseball.com',
                 'collected_at': datetime.now().isoformat(),
-                'total_records': len(all_pitcher_data)
+                'total_records': len(all_pitcher_data),
+                'note': '현대 유니콘스 등 과거 팀 포함'
             },
             'data': all_pitcher_data
         }, f, ensure_ascii=False, indent=2)
