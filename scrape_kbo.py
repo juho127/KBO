@@ -90,71 +90,92 @@ def get_teams_for_year(page):
     return teams
 
 
-def collect_team_data(page, year, team_code, team_name):
-    """특정 팀의 전체 선수 데이터 수집"""
-    all_players = []
+def collect_team_data(page, year, team_code, team_name, max_retries=5):
+    """특정 팀의 전체 선수 데이터 수집 (재시도 로직 포함)"""
 
-    try:
-        # 팀 선택
-        page.select_option('select[name*="ddlTeam"]', team_code)
-        time.sleep(1)
-        page.wait_for_selector('table.tData01', timeout=30000)
+    for attempt in range(max_retries):
+        all_players = []
+        try:
+            # 팀 선택
+            page.select_option('select[name*="ddlTeam"]', team_code)
+            time.sleep(3)  # 대기 시간 증가 (2->3초)
+            page.wait_for_selector('table.tData01', timeout=60000)
+            time.sleep(2)  # 추가 대기 (1->2초)
 
-        # 첫 페이지 데이터 추출
-        html = page.content()
-        page_players = parse_table(html, year, team_code, team_name)
-        if page_players:
-            all_players.extend(page_players)
+            # 첫 페이지 데이터 추출
+            html = page.content()
+            page_players = parse_table(html, year, team_code, team_name)
+            if page_players:
+                all_players.extend(page_players)
 
-        # 페이지 수 확인
-        total_pages = get_total_pages(html)
+            # 페이지 수 확인
+            total_pages = get_total_pages(html)
 
-        # 2페이지 이상 있으면 추가 수집
-        if total_pages > 1:
-            for page_num in range(2, total_pages + 1):
-                try:
-                    btn_selector = f'a[id*="btnNo{page_num}"]'
-                    if page.locator(btn_selector).count() > 0:
-                        page.click(btn_selector)
-                        time.sleep(0.8)
-                        page.wait_for_selector('table.tData01', timeout=30000)
+            # 2페이지 이상 있으면 추가 수집
+            if total_pages > 1:
+                for page_num in range(2, total_pages + 1):
+                    try:
+                        btn_selector = f'a[id*="btnNo{page_num}"]'
+                        if page.locator(btn_selector).count() > 0:
+                            page.click(btn_selector)
+                            time.sleep(1)
+                            page.wait_for_selector('table.tData01', timeout=30000)
 
-                        html = page.content()
-                        page_players = parse_table(html, year, team_code, team_name)
-                        if not page_players:
+                            html = page.content()
+                            page_players = parse_table(html, year, team_code, team_name)
+                            if not page_players:
+                                break
+                            all_players.extend(page_players)
+                        else:
                             break
-                        all_players.extend(page_players)
-                    else:
+                    except Exception as e:
+                        print(f" [페이지 {page_num} 오류: {e}]", end='')
                         break
-                except Exception as e:
-                    print(f" [페이지 {page_num} 오류: {e}]", end='')
-                    break
 
-        return all_players
+            # 데이터가 있으면 성공
+            if all_players:
+                return all_players
 
-    except Exception as e:
-        print(f" [오류: {e}]", end='')
-        return all_players
+            # 데이터가 없으면 재시도
+            if attempt < max_retries - 1:
+                print(f" [재시도 {attempt+1}]", end='')
+                time.sleep(2)
+
+        except Exception as e:
+            if attempt < max_retries - 1:
+                print(f" [오류, 재시도: {e}]", end='')
+                time.sleep(2)
+            else:
+                print(f" [오류: {e}]", end='')
+
+    return all_players
 
 
 def collect_year_data(page, url, year):
-    """특정 연도의 모든 팀 데이터 수집"""
+    """특정 연도의 모든 팀 데이터 수집 (각 팀마다 페이지 새로 로드)"""
     all_players = []
 
     try:
-        # 페이지 로드
+        # 먼저 팀 목록 가져오기
         page.goto(url, timeout=60000)
         page.wait_for_selector('table.tData01', timeout=30000)
-
-        # 연도 선택
         page.select_option('select[name*="ddlSeason"]', str(year))
-        time.sleep(1.5)
+        time.sleep(2)
         page.wait_for_selector('table.tData01', timeout=30000)
-
-        # 해당 연도의 팀 목록 가져오기
         teams = get_teams_for_year(page)
 
+        # 각 팀마다 페이지 새로 로드해서 수집
         for team_code, team_name in teams:
+            # 페이지 새로 로드
+            page.goto(url, timeout=60000)
+            page.wait_for_selector('table.tData01', timeout=30000)
+
+            # 연도 선택
+            page.select_option('select[name*="ddlSeason"]', str(year))
+            time.sleep(2)
+            page.wait_for_selector('table.tData01', timeout=30000)
+
+            # 팀 데이터 수집
             team_players = collect_team_data(page, year, team_code, team_name)
             all_players.extend(team_players)
             print(f" {team_name}:{len(team_players)}", end='')
